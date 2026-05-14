@@ -2,7 +2,9 @@
 
 import { useState } from 'react';
 import Script from 'next/script';
+import Image from 'next/image';
 import { format, startOfToday } from 'date-fns';
+import { CreditCard, QrCode } from 'lucide-react';
 
 const SERVICES = [
   { id: 'thai', title: 'Traditional Thai Massage', price: 800, duration: 60 },
@@ -10,7 +12,6 @@ const SERVICES = [
   { id: 'foot', title: 'Foot Reflexology', price: 600, duration: 60 }
 ];
 
-// Mock Appointment Logic: Generate available slots
 const generateSlots = (date: Date, duration: number) => {
   const slots = [];
   let currentHour = 10;
@@ -20,7 +21,6 @@ const generateSlots = (date: Date, duration: number) => {
     const timeString = `${currentHour.toString().padStart(2, '0')}:${currentMinute.toString().padStart(2, '0')}`;
     slots.push(timeString);
     
-    // Add duration + 30 mins buffer
     const totalMinutes = currentMinute + duration + 30;
     currentHour += Math.floor(totalMinutes / 60);
     currentMinute = totalMinutes % 60;
@@ -37,68 +37,102 @@ export default function BookingForm() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
+  
+  // Payment Options State
+  const [paymentMethod, setPaymentMethod] = useState<'card' | 'promptpay'>('card');
+  const [qrCodeUrl, setQrCodeUrl] = useState('');
 
   const selectedService = SERVICES.find(s => s.id === serviceId);
   const slots = selectedService ? generateSlots(date, selectedService.duration) : [];
 
   const handleNext = () => setStep(p => p + 1);
-  const handleBack = () => setStep(p => p - 1);
+  const handleBack = () => {
+    setStep(p => p - 1);
+    setQrCodeUrl('');
+    setError('');
+  };
 
-  const handlePayment = (e: React.FormEvent) => {
+  const handlePayment = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setLoading(true);
 
-    if (!(window as any).OmiseCard) {
-      setError('Payment system is not loaded yet. Please try again.');
-      setLoading(false);
-      return;
-    }
-
-    const OmiseCard = (window as any).OmiseCard;
-    OmiseCard.configure({
-      publicKey: process.env.NEXT_PUBLIC_OMISE_PUBLIC_KEY || 'pkey_test_xxxx',
-    });
-
-    OmiseCard.open({
-      amount: (selectedService?.price || 0) * 100, // THB in Satang
-      currency: "THB",
-      defaultPaymentMethod: "credit_card",
-      onCreateTokenSuccess: async (nonce: string) => {
-        try {
-          const res = await fetch('/api/checkout', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              token: nonce,
-              amount: selectedService?.price,
-              description: `Booking: ${selectedService?.title} for ${details.name}`
-            })
-          });
-          const data = await res.json();
-          if (data.success) {
-            setSuccess(true);
-            setStep(5); // Success step
-          } else {
-            setError(data.message || 'Payment failed');
-          }
-        } catch (err: any) {
-          setError('An error occurred during payment.');
-        } finally {
-          setLoading(false);
+    if (paymentMethod === 'promptpay') {
+      // Process PromptPay
+      try {
+        const res = await fetch('/api/checkout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            method: 'promptpay',
+            amount: selectedService?.price,
+            description: `Booking: ${selectedService?.title} for ${details.name}`
+          })
+        });
+        const data = await res.json();
+        if (data.success && data.qrCode) {
+          setQrCodeUrl(data.qrCode);
+        } else {
+          setError(data.message || 'Failed to generate QR Code');
         }
-      },
-      onFormClosed: () => {
+      } catch (err: any) {
+        setError('An error occurred during QR code generation.');
+      } finally {
         setLoading(false);
-      },
-    });
+      }
+    } else {
+      // Process Credit Card
+      if (!(window as any).OmiseCard) {
+        setError('Payment system is not loaded yet. Please try again.');
+        setLoading(false);
+        return;
+      }
+
+      const OmiseCard = (window as any).OmiseCard;
+      OmiseCard.configure({
+        publicKey: process.env.NEXT_PUBLIC_OMISE_PUBLIC_KEY || 'pkey_test_xxxx',
+      });
+
+      OmiseCard.open({
+        amount: (selectedService?.price || 0) * 100, // THB in Satang
+        currency: "THB",
+        defaultPaymentMethod: "credit_card",
+        onCreateTokenSuccess: async (nonce: string) => {
+          try {
+            const res = await fetch('/api/checkout', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                method: 'card',
+                token: nonce,
+                amount: selectedService?.price,
+                description: `Booking: ${selectedService?.title} for ${details.name}`
+              })
+            });
+            const data = await res.json();
+            if (data.success) {
+              setSuccess(true);
+              setStep(5);
+            } else {
+              setError(data.message || 'Payment failed');
+            }
+          } catch (err: any) {
+            setError('An error occurred during payment.');
+          } finally {
+            setLoading(false);
+          }
+        },
+        onFormClosed: () => {
+          setLoading(false);
+        },
+      });
+    }
   };
 
   return (
     <div className="bg-white p-8 rounded-2xl shadow-sm border border-beige-100 max-w-3xl mx-auto">
       <Script src="https://cdn.omise.co/omise.js" strategy="lazyOnload" />
       
-      {/* Step Indicators */}
       {step < 5 && (
         <div className="flex justify-between mb-8 text-sm font-medium text-sage-400">
           <span className={step >= 1 ? 'text-sage-900' : ''}>1. Service</span>
@@ -208,27 +242,63 @@ export default function BookingForm() {
           <div className="bg-beige-50 p-6 rounded-xl mb-8 space-y-3 text-sage-800 border border-beige-200">
             <p><strong>Service:</strong> {selectedService?.title}</p>
             <p><strong>Date & Time:</strong> {format(date, 'MMM dd, yyyy')} at {time}</p>
-            <p><strong>Name:</strong> {details.name}</p>
-            <div className="border-t border-beige-200 pt-3 mt-3">
-              <p className="text-xl font-bold flex justify-between">
-                <span>Total Amount</span>
-                <span>฿{selectedService?.price}</span>
-              </p>
-            </div>
+            <p className="text-xl font-bold border-t border-beige-200 pt-3 mt-3">Total: ฿{selectedService?.price}</p>
           </div>
-          
-          {error && <p className="text-red-500 text-sm mb-4">{error}</p>}
 
-          <div className="flex gap-4">
-            <button onClick={handleBack} className="w-1/3 py-3 border border-beige-200 rounded-xl font-medium text-sage-700 hover:bg-beige-50 transition-colors">Back</button>
-            <button 
-              onClick={handlePayment}
-              disabled={loading}
-              className="w-2/3 bg-sage-600 text-beige-50 py-3 rounded-xl font-medium hover:bg-sage-800 transition-colors flex justify-center items-center gap-2"
-            >
-              {loading ? 'Processing...' : 'Pay with Card (Omise)'}
-            </button>
-          </div>
+          {!qrCodeUrl ? (
+            <>
+              <div className="mb-8">
+                <label className="block text-sm font-medium text-sage-700 mb-3">Select Payment Method</label>
+                <div className="grid grid-cols-2 gap-4">
+                  <button 
+                    onClick={() => setPaymentMethod('card')}
+                    className={`flex flex-col items-center justify-center p-4 border-2 rounded-xl transition-colors ${paymentMethod === 'card' ? 'border-sage-600 bg-sage-50 text-sage-900' : 'border-beige-200 text-sage-500 hover:border-sage-300'}`}
+                  >
+                    <CreditCard className="w-8 h-8 mb-2" />
+                    <span className="font-medium">Credit Card</span>
+                  </button>
+                  <button 
+                    onClick={() => setPaymentMethod('promptpay')}
+                    className={`flex flex-col items-center justify-center p-4 border-2 rounded-xl transition-colors ${paymentMethod === 'promptpay' ? 'border-sage-600 bg-sage-50 text-sage-900' : 'border-beige-200 text-sage-500 hover:border-sage-300'}`}
+                  >
+                    <QrCode className="w-8 h-8 mb-2" />
+                    <span className="font-medium">QR PromptPay</span>
+                  </button>
+                </div>
+              </div>
+
+              {error && <p className="text-red-500 text-sm mb-4">{error}</p>}
+
+              <div className="flex gap-4">
+                <button onClick={handleBack} className="w-1/3 py-3 border border-beige-200 rounded-xl font-medium text-sage-700 hover:bg-beige-50 transition-colors">Back</button>
+                <button 
+                  onClick={handlePayment}
+                  disabled={loading}
+                  className="w-2/3 bg-sage-600 text-beige-50 py-3 rounded-xl font-medium hover:bg-sage-800 transition-colors flex justify-center items-center gap-2"
+                >
+                  {loading ? 'Processing...' : paymentMethod === 'card' ? 'Pay with Card' : 'Generate QR Code'}
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="text-center">
+              <h4 className="font-medium text-lg mb-4 text-sage-900">Scan QR Code to Pay</h4>
+              <div className="inline-block p-4 bg-white border border-beige-200 rounded-2xl mb-6 shadow-sm">
+                <img src={qrCodeUrl} alt="PromptPay QR Code" className="mx-auto w-[250px] h-[250px]" />
+              </div>
+              <p className="text-sm text-sage-500 mb-8">Open your banking app and scan this code to complete the booking.</p>
+              
+              <div className="flex gap-4">
+                <button onClick={() => setQrCodeUrl('')} className="w-1/3 py-3 border border-beige-200 rounded-xl font-medium text-sage-700 hover:bg-beige-50 transition-colors">Cancel</button>
+                <button 
+                  onClick={() => { setStep(5); setSuccess(true); }}
+                  className="w-2/3 bg-sage-600 text-beige-50 py-3 rounded-xl font-medium hover:bg-sage-800 transition-colors flex justify-center items-center gap-2"
+                >
+                  Simulate Payment Success
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
